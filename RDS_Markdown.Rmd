@@ -1,0 +1,108 @@
+---
+title: "RDS-assignment"
+author: "B224911"
+date: "2022-11-11"
+output:
+  word_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, results="hide")
+library(pheatmap)
+library(dplyr)
+library(lintr)
+lint("./RDS_script.R")
+```
+## R Markdown for the assignment of RDS
+##Processing the data and make the heatmap
+#because view can not be used in knit, so it not show in report
+
+step1.
+#Load the data into the environment 
+```{r OrignalData}
+gene_annot <- read.csv("gene_annotation.csv")  #  read gene annotation
+sample_annot <- read.csv("sample_annotation.csv")  #  read sample annotation
+ori_data <- read.csv("data_all.csv")  # read numerical unprocessed data
+# read the list of genes to use for plotting
+genelist <- read.table("genelist_15.txt", header = TRUE, sep = "\t")
+# Check the data
+```
+
+step2.
+#convert the data_all to log scaled data.
+#Select the required data for the plot.
+#Each gene should only appear once on the final plot.
+
+```{r LogAndDup}
+log_data <- log(ori_data[, -1])
+# Select the required data for the plot
+# Each gene should only appear once on the final plot
+dup_list <- duplicated(genelist$x)
+nodup_list <- sort(genelist[!dup_list, ])
+nodup_list  # check the unduplicated gene list
+class(nodup_list)
+# Select the unduplicated unprocessed data
+select_data <- log_data[nodup_list, ]
+```
+
+step3.
+#In the plot annotate each gene row with the type of gene it is (XA, XB or XC) 
+#and annotate each sample with the treatment group that the sample was derived from.
+#Before plotting the samples, rename the gene names with the “LongName” from the gene annotation table.
+
+```{r annotaiton}
+g_annot <- gene_annot[nodup_list, ]
+identical(rownames(g_annot), rownames(select_data))
+# Build the row and column annotation index
+# Select one colume which is genetype column of 'g_annot' as the row annotation
+# but it is not the dataframe type, so change its tpye
+# and rename the rownames as same as the genenames(“LongName”) of select_data
+annot_row <- (g_annot[, 3])
+class(annot_row)
+annot_row <- data.frame(g_annot[, 3])
+# Create a nicer name for genetype
+annot_row <- rename(annot_row,  "GeneType" = "g_annot...3.")
+rownames(annot_row) <- g_annot$LongName
+
+# Select the treatment group column of sample_annot as the column annotation
+# and deal with the 'annot_col' in the same way
+annot_col <- data.frame(sample_annot[, 3])
+# create a nicer name for treatmentgroup
+annot_col <- rename(annot_col, "TreatmentGroup" = "sample_annot...3.")
+rownames(annot_col) <- sample_annot[, 2]
+# Rename the gene names with the “LongName”
+rownames(select_data) <- g_annot$LongName
+
+```
+
+
+step4.
+#make the heatmap
+```{r heatmap}
+pheatmap(
+  select_data,
+  scale = 'row',
+  annotation_col = annot_col,
+  annotation_row = annot_row,
+  cluster_col = TRUE,
+  cluster_row = TRUE,  # Both cluster
+  main = 'Heatmap of genes and the samples are clustered',
+  legend = TRUE,
+  fontsize_row = 6,
+  fontsize_col = 12
+  )
+# Plot2
+pheatmap(
+  select_data,
+  scale = 'row',
+  annotation_col = annot_col,
+  annotation_row = annot_row,
+  cluster_col = FALSE,
+  cluster_row = TRUE,  # Only gene cluster
+  main = 'Heatmap of only the genes are clustered',
+  legend = TRUE,
+  fontsize_row = 6,
+  fontsize_col = 12
+  )
+```

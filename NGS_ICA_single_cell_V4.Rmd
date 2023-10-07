@@ -1,0 +1,473 @@
+---
+title: "NGS_ICA_single_cell"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+## 1.Load Main Libraries for the Analysis
+```{r setup, include=TRUE,echo=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+
+packageNames <- c("plotly", "Rtsne", "edgeR", "tximport", "org.Mm.eg.db", "gplots", "pheatmap", "scde","tximport","limma","org.Mm.eg.db","gplots","scde","edgeR","ggplot2","gridExtra","plotly","Rtsne","gridExtra","pkgconfig","RColorBrewer","Cairo","SingleCellExperiment","scater","scran","annotate")
+
+libraryLoads <- lapply(packageNames, library, character.only = TRUE)
+
+#load scripts
+source("./single_cell_functions2.R")
+
+#set the global random seed used for analysis
+set.seed(MY_SEED)
+knitr::opts_knit$set(root.dir = normalizePath(getwd())) 
+knitr::opts_knit$get("root.dir") 
+
+```
+
+
+##2.Read Kallisto Counts and Associated Input Data (Spikes and Mitochondrial Gene IDs)
+```{r read_input, echo=FALSE}
+
+library(tximport)
+library("SingleCellExperiment")
+
+
+#Fast Load the data  from the Kallisto alignments
+#This data was saved previously after loading data using the "slow" method
+kallistoFiles <-readRDS(file = "./single_es_tximport.rds")
+sce <- SingleCellExperiment(assays=list(counts=kallistoFiles$counts,abundance=kallistoFiles$abundance))
+```
+
+
+##3.Calculate Initial Quality Control Metrics
+
+```{r qc_process_data, echo=FALSE}
+print("Checking Internal Controls...")
+# remove samples which deviate from the median
+is.spike <- grepl("^ERCC", rownames(sce))
+print(paste0("Count Spike: ",count(is.spike)))
+
+#This list of identifiers was obtained from ENSEMBL
+mitogenes="ENSMUSG00000064336|ENSMUSG00000064337|ENSMUSG00000064338|ENSMUSG00000064339|ENSMUSG00000064340|ENSMUSG00000064341|ENSMUSG00000064342|ENSMUSG00000064343|ENSMUSG00000064344|ENSMUSG00000064345|ENSMUSG00000064346|ENSMUSG00000064347|ENSMUSG00000064348|ENSMUSG00000064349|ENSMUSG00000064350|ENSMUSG00000064351|ENSMUSG00000064352|ENSMUSG00000064353|ENSMUSG00000064354|ENSMUSG00000064355|ENSMUSG00000064356|ENSMUSG00000064357|ENSMUSG00000064358|ENSMUSG00000064359|ENSMUSG00000064360|ENSMUSG00000064361|ENSMUSG00000065947|ENSMUSG00000064363|ENSMUSG00000064364|ENSMUSG00000064365|ENSMUSG00000064366|ENSMUSG00000064367|ENSMUSG00000064368|ENSMUSG00000064369|ENSMUSG00000064370|ENSMUSG00000064371|ENSMUSG00000064372"
+is.mito <- grepl(mitogenes, rownames(sce))
+print(paste0("Count Mito: ",count(is.mito)))
+
+#Check spikes
+which(is.spike, arr.ind = FALSE, useNames = TRUE)
+which(is.mito, arr.ind = FALSE, useNames = TRUE)
+
+#Calculate QC metrics
+sce$stats <- perCellQCMetrics(sce, subsets=list(ERCC=is.spike, Mt=is.mito))
+
+
+#Plot the results
+par(mfrow=c(1,2))
+hist(sce$stats$sum/1e6, xlab="Library sizes (millions)", main="", 
+     breaks=20, col="grey80", ylab="Number of cells")
+hist(sce$stats$detected, xlab="Number of detected genes", main="", 
+     breaks=20, col="grey80", ylab="Number of cells")
+
+libsize.drop <- isOutlier(sce$stats$sum, nmads=3, type="lower", log=TRUE)
+feature.drop <- isOutlier(sce$stats$detected, nmads=3, type="lower", log=TRUE)
+
+
+par(mfrow=c(1,2))
+hist(sce$stats$subsets_Mt_percent, xlab="Mitochondrial proportion (%)", 
+     ylab="Number of cells", breaks=20, main="", col="grey80")
+hist(sce$stats$subsets_ERCC_percent, xlab="ERCC proportion (%)", 
+     ylab="Number of cells", breaks=20, main="", col="grey80")
+
+mito.drop <- isOutlier(sce$stats$subsets_Mt_percent, nmads=3, type="higher")
+spike.drop <- isOutlier(sce$stats$subsets_ERCC_percent, nmads=3, type="higher")
+
+#make a copy of the main object for later...
+sceX <-sce
+
+#Drop Samples that fail the Quality filtering
+sce <- sce[,!(libsize.drop | feature.drop | mito.drop | spike.drop)]
+
+```
+
+##4.After Completion of QC Filtering of Individual Cell Libraries
+```{r qc_process_data15, echo=TRUE}
+#summarises the number of elements removed by each filtering step and the 
+#number of cell sample libraries remaining in the data.
+data.frame(ByLibSize=sum(libsize.drop), ByFeature=sum(feature.drop),
+           ByMito=sum(mito.drop), BySpike=sum(spike.drop), Remaining=ncol(sce))
+print("Dimensions finished object")
+dim(sce)
+print("Dimensions finished starting object")
+dim(sceX)
+colnames(sce)
+```
+
+## 5.Sample Quality Plots after Removing Poor Quality Samples
+```{r qc_process_data2, echo=FALSE}
+# check what's been removed
+# This summarises the filtering of samples from the data
+
+#recalculate the stats for selected elements only
+#all genes are included at this stage...
+sce$stats_selected_cells <- perCellQCMetrics(sce, subsets=list(ERCC=is.spike, Mt=is.mito))
+
+#par sets up a panel plot 2x2 in dimension
+par(mfrow=c(2,2))
+hist(sce$stats_selected_cells$sum/1e6, xlab="Library sizes (millions)", main="", 
+     breaks=20, col="grey80", ylab="Number of cells")
+hist(sce$stats_selected_cells$detected, xlab="Number of expressed genes", main="", 
+     breaks=20, col="grey80", ylab="Number of cells")
+hist(sce$stats_selected_cells$subsets_Mt_percent, xlab="Mitochondrial proportion (%)", 
+     ylab="Number of cells", breaks=20, main="", col="grey80")
+hist(sce$stats_selected_cells$subsets_ERCC_percent, xlab="ERCC proportion (%)", 
+     ylab="Number of cells", breaks=20, main="", col="grey80")
+par(mfrow=c(1,1))
+```
+
+
+## 6.PCA of Raw Log Counts (Just Log Transformed) without Normalisation
+```{r qc_process_data3, echo=FALSE}
+#This plot just shows the general structure of the prior to normalisation.  It uses as input all the data, #concluding genes with low or zero counts
+
+#This deals with potential log(0) outcomes 
+logabit <-function(xv){
+  return (log2(xv+0.01))
+  }
+
+assays(sce)$logcounts<-logabit(assays(sce)$counts)
+sce <-runPCA(sce,exprs_values="logcounts")
+reducedDimNames(sce)
+plotReducedDim(sce,dimred = "PCA")
+```
+
+## 7.Conversion to Gene Names from Ensembl IDs as Primary Identifiers
+```{r annotate, echo=FALSE}
+
+#Ensembl IDs are the primary key-they are unique and all elements ahe these IDs ("Ensembl included Spike names!")
+
+rowData(sce)$ENSEMBL<-rownames(sce) # Row names were Ensembl gene names (collapsed from transcripts)
+
+anno <- AnnotationDbi::select(org.Mm.eg.db, keys=rownames(sce), keytype="ENSEMBL", column="SYMBOL")
+rowData(sce)$SYMBOL <-make.names(anno$SYMBOL[match(rownames(sce), anno$ENSEMBL)],unique=TRUE)
+rownames(sce)<-rowData(sce)$SYMBOL
+
+```
+
+## 8.Cell Cycle Annotation
+```{r qc_process_cellcycle, echo=FALSE}
+mm.pairs <- readRDS(system.file("exdata", "mouse_cycle_markers.rds", package="scran"))
+
+assignments <- cyclone(sce, mm.pairs, gene.names=rowData(sce)$ENSEMBL)
+plot(assignments$score$G1, assignments$score$G2M, xlab="G1 score", ylab="G2/M score", pch=16)
+
+#build cell cycle score table
+length(assignments$score$G1)
+length(assignments$score$G2M)
+length(assignments$score$S)
+length(colnames(sce))
+
+#Threshold based upon assignment scores
+G1_flag <-assignments$score$G1 >0.5 # could be changed 
+G2M_flag <-assignments$score$G2M >0.5
+S_flag <-assignments$score$S >0.5
+
+
+#This code is required because we need to guarentee a single unique cell cycle stage assignment
+cell_cycle_factor<-vector('character')
+
+i<- 1
+while(i <= length(colnames(sce))){
+  
+  if(G1_flag[i] && !G2M_flag[i] && !S_flag[i]){
+    cell_cycle_factor<-c(cell_cycle_factor,"G1")
+  }else if(G2M_flag[i] && !G1_flag[i] && !S_flag[i]) {
+    cell_cycle_factor<-c(cell_cycle_factor,"G2M")
+  }else if(S_flag[i] && !G2M_flag[i] && !G1_flag[i]){
+    cell_cycle_factor<-c(cell_cycle_factor,"S")
+  }else{
+    cell_cycle_factor<-c(cell_cycle_factor,"None")
+  }
+  
+  i<-i+1
+  
+}
+
+class(cell_cycle_factor)
+length(cell_cycle_factor)
+
+
+sce$CellCycle <-cell_cycle_factor
+
+print("Added CellCycle slot to sce object")
+table(colData(sce)$CellCycle)
+length(colData(sce)$CellCycle)
+
+```
+
+## 9.Evaluation of Cell Cycle Annotation
+```{r qc_process_data4, echo=FALSE}
+#Output of Cell Cycle Predictions plotted onto a PCA plot of the sce data set which has been filtered for poor quality cells but not to remove genes with low read counts.
+plotReducedDim(sce,dimred = "PCA", colour_by="CellCycle")+COLOURS_DIS +FONTSIZE+ggtitle("PCA Cell Cycle")
+```
+
+## 10.Plot Top 50 Most Highly Expressed Genes from the Combined Data Set
+```{r copy_highest_expression_plot, echo=FALSE}
+plotHighestExprs(sce, n=50) + FONTSIZE
+```
+
+## 11.Remove the Spikes and Put These Into an Alt Experiment Within the Single Cell Experiment Object
+```{r spike_alt_experiment, echo=FALSE}
+#delete the spikes out of the main object so that they do not intefere with the normalisation
+#of the main data.  Spikes are normalised separately... 
+sub_spikes <-grepl("ERCC-",rowData(sce)$ENSEMBL)
+
+#remove spike from main data
+test_sce <-splitAltExps(sce,sub_spikes)
+altExpNames(test_sce)<-"spikes"
+
+#restructure main data object
+sce<-test_sce
+```
+
+##12.Remove Genes with Low Counts/Bulk samples.
+```{r process_samples, echo=FALSE}
+#low counts
+#Test elimination of genes with an averaga count <1 - data not normalised at this stage
+ave.counts <-apply(assays(sce)$counts,1,mean)
+ave.counts.spikes <-apply(assays(altExp(sce,"spikes"))$counts,1,mean)
+
+keep <- ave.counts >= 1
+sum(keep)
+
+num.cells <- nexprs(sce, byrow=TRUE)
+keep_nonzero <-num.cells>0
+
+#alternate keep
+numcells <- nexprs(sce, byrow=TRUE)
+numcells_spike <- nexprs(altExp(sce,"spikes"), byrow=TRUE)
+alt.keep <- numcells >= 10
+sum(alt.keep)
+
+#combine the data for the plot
+ave<-c(ave.counts,ave.counts.spikes)
+
+par(mfrow=c(1,2))
+hist(log10(ave), breaks=100, main="", col="grey80",
+     xlab=expression(Log[10]~"average count"))
+abline(v=log10(1), col="blue", lwd=2, lty=2)
+
+#Plot the filtering results 
+smoothScatter(log10(ave), c(numcells,numcells_spike), xlab=expression(Log[10]~"average count"), 
+              ylab="Number of expressing cells")
+is.ercc <- grepl("^ERCC", ave)
+points(log10(ave.counts[is.ercc]), numcells[is.ercc], col="red", pch=16, cex=0.5)
+
+##apply mean filtering...colnames
+print(paste0("Number Genes Before: ",nrow(sce)))
+#sce <- sce[keep,] #select rowa to keep 
+sce <- sce[alt.keep,]
+
+print(paste0("Number Genes After: ",nrow(sce)))
+
+
+## Remove Bulk Samples that May Still be Present in the Data
+#remove bulk samples at this point
+#annotate as required from targets file IDs must e unique
+targets <-read.csv(file="./E-MTAB-2600.targets.txt",sep='\t')
+colnames.all <-colnames(sce)
+colnames.keep<- as.character(targets$ERR) %in% colnames.all
+targets <-targets[colnames.keep,]
+targets <-targets[match(targets$ERR,colnames.all),]
+
+#check
+#targets$ERR
+#colnames(sce)
+sce$Type <-targets$Type
+
+#rename columns in sce to easier names
+colnames(sce)<-targets$ExtractName
+colnames.all <-colnames(sce)
+#remove bulk data (not needed in this analysis)
+sum(lengths(regmatches(colnames.all, gregexpr("bulk", colnames.all))))
+
+keepme  <-colnames.all[!(regexpr("bulk",colnames.all)>0)]
+rownames(targets)<-targets$ExtractName
+targets <-targets[keepme,]
+sce <-sce[,keepme]
+
+length(colnames(sce))
+length(targets$ExtractName)
+colnames.all <-colnames(sce)
+
+print("Bulk Samples Remaining")
+table(targets$Type)
+```
+
+## 13.Normalisation of Data
+```{r normalisation, echo=FALSE}
+#get sizes
+A<-sum(lengths(regmatches(colnames.all, gregexpr("^2i", colnames.all))))
+#B<-sum(lengths(regmatches(colnames.all, gregexpr("^2i_bulk", colnames.all))))
+C<-sum(lengths(regmatches(colnames.all, gregexpr("^a2i", colnames.all))))
+#D<-sum(lengths(regmatches(colnames.all, gregexpr("^a2i_bulk", colnames.all))))
+E <-sum(lengths(regmatches(colnames.all, gregexpr("^serum", colnames.all))))
+#F <-sum(lengths(regmatches(colnames.all, gregexpr("^serum_bulk", colnames.all))))
+
+test_norm1 <- computeSumFactors(sce,sizes=c(A,C,E) )
+test_norm2 <-computeSpikeFactors(sce, "spikes")
+
+par(mfrow=c(1,2))
+plot(sizeFactors(test_norm1), test_norm1$stats_selected_cells$sum/1e6, log="xy",
+     ylab="Library size (millions)", xlab="Size factor",main="Sum Factors")
+
+plot(sizeFactors(test_norm2), test_norm2$stats_selected_cells$sum/1e6, log="xy",main= "Spike",
+     ylab="Library size (millions)", xlab="Size factor")
+
+par(mfrow=c(1,1))
+
+#set in main object
+#This can be confusing- here we are adding the results of computeSumFactors to sce
+sce <-computeSpikeFactors(sce,"spikes", assay.type="counts")
+sce <- computeSumFactors(sce,sizes=c(A,C,E),assay.type="counts") 
+summary(sizeFactors(sce))
+#Normalizing (gene-based factors for genes, spike-in factors for spike-ins)
+
+sce <- logNormCounts(sce) ###sizeFactors are applied
+
+plot(sizeFactors(sce), sce$stats_selected_cells$sum/1e6, log="xy",main= "Size factors sce object",
+     ylab="Library size (millions)", xlab="Size factor")
+
+```
+
+## 14.QC Feature counts for Explanatory Variables
+```{r check_exp_variables, echo=FALSE}
+#Log transformed
+colnames(colData(sce))
+vars <-c("CellCycle")
+vars_res <-getVarianceExplained(sce,vars)
+plotExplanatoryVariables(vars_res) + FONTSIZE
+```
+
+## 15.Identify the Highly Variable Genes from the Data.
+```{r identify_features, echo=FALSE}
+
+var.out <- modelGeneVar(sce)
+
+plot(var.out$mean, var.out$total, pch=16, cex=0.6, xlab="Mean log-expression", 
+     ylab="Total Variance of log-expression")
+
+o <- order(var.out$mean)
+lines(var.out$mean[o], var.out$tech[o], col="dodgerblue", lwd=2)
+#cur.spike <- isSpike(sce)
+#points(var.out$mean[cur.spike], var.out$total[cur.spike], col="red", pch=16)
+
+
+hvg.out <- var.out[which(var.out$FDR <= 0.2 & var.out$bio >= 0.5),]
+hvg.out <- hvg.out[order(hvg.out$bio, decreasing=TRUE),] 
+nrow(hvg.out)
+
+write.table(file="hsc_hvg.tsv", hvg.out, sep="\t", quote=FALSE, col.names=NA)
+head(hvg.out)
+
+plotExpression(sce, rownames(hvg.out)[1:30]) + FONTSIZE +ggtitle("Top 30 HVG genes across all data")
+
+var.cor <- correlatePairs(sce, subset.row=rownames(hvg.out))
+write.table(file="hsc_cor.tsv", var.cor, sep="\t", quote=FALSE, row.names=FALSE)
+head(var.cor)
+
+#too many correlated genes-fixed
+sig.cor <- var.cor$FDR <= 0.01
+summary(sig.cor)
+
+#these genes will be used for the tSNE plots by default...
+
+chosen <- var.cor$gene1[sig.cor]
+chosen <-c(chosen,var.cor$gene2[sig.cor] )
+chosen <-unique(chosen)
+chosen <-na.omit(chosen)
+print("number of chosen genes for plots")
+length(chosen)
+print("number of HVG genes for plots")
+length(hvg.out)
+
+```
+
+
+## 16.Plot
+```{r heatmaps101, echo=FALSE}
+#make a heatmap
+norm.exprs <- exprs(sce[chosen,])
+heat.vals <- norm.exprs - rowMeans(norm.exprs)
+asample<-sample(rownames(heat.vals),100)
+library(gplots)
+heat.out <- heatmap.2(heat.vals[asample,], col=bluered, symbreak=TRUE, trace='none', cexRow=0.6,labRow=T,labCol=FALSE)
+
+#make a pca plot
+sce <-runPCA(sce, subset_row=chosen)
+plotPCA(sce, colour_by ="CellCycle") +FONTSIZE +COLOURS_DIS
+sce <-runTSNE(sce) ## tSNE Plot Coloured by Total Features per Sample
+sce$sum <-sce$stats_selected_cells$sum
+plotTSNE(sce,colour_by="sum") +FONTSIZE 
+
+## Selection of the tSNE 'Perplexity' tuning parameter
+sce_test <-sce
+set.seed(MY_SEED)
+sce_test <-runTSNE(sce_test, feature_set=chosen,perplexity=5)
+tSNEList1 <-plotTSNE(sce_test,colour_by="sum") +FONTSIZE +ggtitle("Perplexity 5")
+set.seed(MY_SEED)
+sce_test <-runTSNE(sce_test, feature_set=chosen,perplexity=10)
+tSNEList2<-plotTSNE(sce_test,colour_by="sum") +FONTSIZE +ggtitle("Perplexity 10")
+set.seed(MY_SEED)
+sce_test <-runTSNE(sce_test, feature_set=chosen,perplexity=15)
+tSNEList3 <-plotTSNE(sce_test,colour_by="sum") +FONTSIZE +ggtitle("Perplexity 15")
+set.seed(MY_SEED)
+sce_test <-runTSNE(sce_test, feature_set=chosen,perplexity=20)
+tSNEList4 <-plotTSNE(sce_test,colour_by="sum") +FONTSIZE +ggtitle("Perplexity 20")
+multiplot(tSNEList1,tSNEList2,tSNEList3,tSNEList4,cols=2)
+set.seed(MY_SEED)
+sce <-runTSNE(sce, feature_set=chosen,perplexity=10)
+
+## Loading 'Target' File and Building Sample Annotation
+#Load targets file and build this annotation into the SingleCellExperiment object.
+print("Column names of loaded \"targets\" file")
+colnames(targets)
+
+#add colnames to filtered object
+colnames2.keep<- as.character(targets$ERR) %in% colnames(sce)
+sum(colnames2.keep)
+set.seed(MY_SEED)
+sce_temp<-sce
+sce_temp <-runTSNE(sce_temp, feature_set=chosen,perplexity=5)
+tSNEList1 <-plotTSNE(sce_temp,colour_by="Type") +FONTSIZE +ggtitle("All samples Perplexity 5")
+set.seed(MY_SEED)
+sce_temp <-runTSNE(sce_temp, feature_set=chosen,perplexity=10)
+tSNEList2<-plotTSNE(sce_temp,colour_by="Type") +FONTSIZE +ggtitle("All samples Perplexity 10")
+set.seed(MY_SEED)
+sce_temp <-runTSNE(sce_temp, feature_set=chosen,perplexity=15)
+tSNEList3 <-plotTSNE(sce_temp,colour_by="Type") +FONTSIZE +ggtitle("All samples Perplexity 15")
+set.seed(MY_SEED)
+sce_temp <-runTSNE(sce_temp, feature_set=chosen,perplexity=20)
+tSNEList4 <-plotTSNE(sce_temp,colour_by="Type") +FONTSIZE +ggtitle("All samples Perplexity 20")
+multiplot(tSNEList1,tSNEList2,tSNEList3,tSNEList4,cols=2)
+
+#single plot
+set.seed(MY_SEED)
+plotTSNE(sce,colour_by="Type") +FONTSIZE +ggtitle("Perplexity 10 ")
+
+## Plot final PCA of All Data Coloured by Type Loaded From the Targets  File
+plotPCA(sce,colour_by="Type") + FONTSIZE +COLOURS_DIS
+
+## Final PCA Plot With All SCE Data
+#Examine all ZScan Genes in the Expression Data
+experiment <- data.frame(sce$Type)
+rownames(experiment) <-colnames(sce)
+
+#Just use this grep to find all genes with names containing "Zscan"
+zscans <-grep("Zscan",rownames(sce))
+norm.exprs <- exprs(sce[zscans,])
+heat.vals <- norm.exprs - rowMeans(norm.exprs)
+
+#add pretty heatmap
+pheatmap(heat.vals, show_colnames = F,annotation_col=experiment)
+```
+
+
+
